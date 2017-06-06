@@ -1,0 +1,85 @@
+plugins {
+  id 'java'
+  id "com.bmuschko.docker-remote-api" version '3.0.7'
+}
+
+sourceCompatibility = 1.6
+targetCompatibility = 1.6
+
+jar {
+  manifest {
+    attributes('Main-Class': 'com.coruscations.java6test.Main')
+  }
+}
+
+task dockerAssemble()
+task dockerBuild()
+
+// No test code
+testClasses.enabled = false
+
+[6, 7].each {ver ->
+
+  def dockerBuildPath = project.buildDir.toPath().resolve("docker/java${ver}")
+
+  task "dockerAssembleJava${ver}"(type: com.bmuschko.gradle.docker.tasks.image.Dockerfile, dependsOn: jar) {
+    description "creates Java${ver} Dockerfile"
+    group 'Docker'
+    destFile = dockerBuildPath.resolve('Dockerfile').toFile()
+    from "java:${ver}-jre"
+    maintainer 'Michael Werle <mkw-github@coruscations.com>'
+
+    addFile "${project.name}.jar", '/root/main.jar'
+    entryPoint('sh', '-c')
+    defaultCommand('while true; do sleep 1000; done')
+
+    doLast {
+      copy {
+        from "${project.buildDir}/libs/"
+        include "${project.name}.jar"
+        into dockerBuildPath
+      }
+    }
+  }
+  dockerAssemble.dependsOn "dockerAssembleJava${ver}"
+
+  task "dockerBuildJava${ver}"(type: com.bmuschko.gradle.docker.tasks.image.DockerBuildImage,
+      dependsOn: "dockerAssembleJava${ver}") {
+    description "builds Java${ver} image"
+    group 'Docker'
+    inputDir dockerBuildPath.toFile()
+  }
+  dockerBuild.dependsOn "dockerBuildJava${ver}"
+
+  task "dockerCreateContainerJava${ver}"(type: com.bmuschko.gradle.docker.tasks.container.DockerCreateContainer) {
+    dependsOn "dockerBuildJava${ver}"
+    targetImageId {project."dockerBuildJava${ver}".getImageId()}
+  }
+
+  task "dockerStartContainerJava${ver}"(type: com.bmuschko.gradle.docker.tasks.container.DockerStartContainer) {
+    dependsOn "dockerCreateContainerJava${ver}"
+    targetContainerId {project."dockerCreateContainerJava${ver}".getContainerId()}
+  }
+
+  task "dockerRemoveContainerJava${ver}"(type: com.bmuschko.gradle.docker.tasks.container.DockerRemoveContainer) {
+    targetContainerId {project."dockerCreateContainerJava${ver}".getContainerId()}
+    force = true
+  }
+
+  task "dockerExec${ver}"
+
+  ['FullyQualified' :  'fully-qualified', 'Import': 'import'].each { key, value ->
+    task "test${key}Java${ver}"(type: com.bmuschko.gradle.docker.tasks.container.DockerExecContainer) {
+      dependsOn "dockerStartContainerJava${ver}"
+      targetContainerId {project."dockerCreateContainerJava${ver}".getContainerId()}
+      cmd = ['sh', '-c', "java -jar /root/main.jar ${value}"]
+    }
+    project."dockerExec${ver}".dependsOn "test${key}Java${ver}"
+  }
+
+  task "test${ver}" {
+    dependsOn project."dockerExec${ver}"
+    finalizedBy project."dockerRemoveContainerJava${ver}"
+  }
+  test.dependsOn "test${ver}"
+}
